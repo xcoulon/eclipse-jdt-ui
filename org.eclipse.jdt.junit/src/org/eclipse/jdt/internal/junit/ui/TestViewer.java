@@ -9,8 +9,9 @@
  *     IBM Corporation - initial API and implementation
  *     Brock Janiczak (brockj@tpg.com.au)
  *         - https://bugs.eclipse.org/bugs/show_bug.cgi?id=102236: [JUnit] display execution time next to each test
- *     Xavier Coulon <xcoulon@redhat.com> - https://bugs.eclipse.org/bugs/show_bug.cgi?id=102512 - [JUnit] test method name cut off before (
-
+ *     Xavier Coulon <xcoulon@redhat.com>
+ *         - https://bugs.eclipse.org/bugs/show_bug.cgi?id=102512 - [JUnit] test method name cut off before (
+ *         - https://bugs.eclipse.org/bugs/show_bug.cgi?id=372588 - [JUnit] Add "Link with Editor" to JUnit view
  *******************************************************************************/
 
 package org.eclipse.jdt.internal.junit.ui;
@@ -23,7 +24,11 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.ListIterator;
 
+import org.eclipse.jdt.junit.model.ITestCaseElement;
 import org.eclipse.jdt.junit.model.ITestElement;
+import org.eclipse.jdt.junit.model.ITestElement.ProgressState;
+import org.eclipse.jdt.junit.model.ITestElementContainer;
+import org.eclipse.jdt.junit.model.ITestSuiteElement;
 
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.dnd.Clipboard;
@@ -42,8 +47,10 @@ import org.eclipse.jface.action.IMenuManager;
 import org.eclipse.jface.action.MenuManager;
 import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.viewers.AbstractTreeViewer;
+import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionChangedListener;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.ITreeSelection;
 import org.eclipse.jface.viewers.SelectionChangedEvent;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StructuredViewer;
@@ -52,13 +59,23 @@ import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerFilter;
 
+import org.eclipse.jface.text.ITextSelection;
+
+import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.ISelectionListener;
 import org.eclipse.ui.IWorkbenchActionConstants;
+import org.eclipse.ui.IWorkbenchPart;
+import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.part.PageBook;
 
 import org.eclipse.debug.core.ILaunchConfiguration;
 import org.eclipse.debug.core.ILaunchManager;
 
+import org.eclipse.jdt.core.IClassFile;
+import org.eclipse.jdt.core.ICompilationUnit;
+import org.eclipse.jdt.core.IJavaElement;
 import org.eclipse.jdt.core.IJavaProject;
+import org.eclipse.jdt.core.IMethod;
 import org.eclipse.jdt.core.IType;
 import org.eclipse.jdt.core.JavaModelException;
 
@@ -72,11 +89,16 @@ import org.eclipse.jdt.internal.junit.model.TestSuiteElement;
 
 import org.eclipse.jdt.launching.IJavaLaunchConfigurationConstants;
 
+import org.eclipse.jdt.ui.JavaUI;
+
+import org.eclipse.jdt.internal.ui.javaeditor.CompilationUnitEditor;
+import org.eclipse.jdt.internal.ui.javaeditor.EditorUtility;
+import org.eclipse.jdt.internal.ui.javaeditor.JavaEditor;
 import org.eclipse.jdt.internal.ui.viewsupport.ColoringLabelProvider;
 import org.eclipse.jdt.internal.ui.viewsupport.SelectionProviderMediator;
 
 
-public class TestViewer {
+public class TestViewer implements ISelectionListener {
 	private final class TestSelectionListener implements ISelectionChangedListener {
 		public void selectionChanged(SelectionChangedEvent event) {
 			handleSelected();
@@ -343,6 +365,11 @@ public class TestViewer {
 			testElement= (TestElement) selection.getFirstElement();
 		}
 		fTestRunnerPart.handleTestSelected(testElement);
+		// if LinkWithEditor is active, reveal the JavaEditor and select the java type or method
+		// matching the selected test element, even if the JavaEditor is opened by not active.
+		if (fTestRunnerPart.isLinkWithEditorActive()) {
+			handleTestElementSelected(testElement);
+		}
 	}
 
 	public synchronized void setShowTime(boolean showTime) {
@@ -609,6 +636,228 @@ public class TestViewer {
 			fTreeViewer.reveal(current);
 	}
 
+	/**
+	 * Sets the current selection from the given {@link IEditorPart} (if it is a
+	 * {@link CompilationUnitEditor}) and its selection.
+	 * 
+	 * @param editor the selected Java Element in the active Compilation Unit Editor
+	 * 
+	 * @since 3.8
+	 */
+	public void setSelection(final IEditorPart editor) {
+		if (editor != null) {
+			final IJavaElement selectedJavaElement= getSelectedJavaElementInEditor(editor);
+			setSelection(selectedJavaElement);
+		}
+	}
+	
+	/**
+	 * Sets the current selection from the given {@link IJavaElement} if it matches an
+	 * {@link ITestCaseElement} and updates the LinkWithEditorAction image in the associated
+	 * {@link TestRunnerViewPart}.
+	 * 
+	 * @param activeJavaElement the selected Java Element (or null) in the active
+	 *            {@link IWorkbenchPart}
+	 * 
+	 */
+	private void setSelection(final IJavaElement activeJavaElement) {
+		final ITestElement activeTestCaseElement= findClosestTestElement(activeJavaElement, getCurrentViewerSelection());
+		if (activeTestCaseElement != null) {
+			// update the current selection in the viewer if it does not match with the java element selected in the given part (if it's not the parent TestViewerPart)
+			final Object currentSelection= getCurrentViewerSelection();
+			if (!activeTestCaseElement.equals(currentSelection)) {
+				final IStructuredSelection selection= new StructuredSelection(activeTestCaseElement);
+				fSelectionProvider.setSelection(selection, true);
+			}
+			// ensure link with editor is in 'synced' mode
+			fTestRunnerPart.setLinkingWithEditorInSync(true);
+		}
+		else {
+			// selection is out-of-sync: show a different icon on the button.
+			fTestRunnerPart.setLinkingWithEditorInSync(false);
+		}
+	}
+
+	/**
+	 * @return the current {@link ITestElement} in the JUnit Viewer (provided by the underlying
+	 *         selection provider), or {@code null} if the kind of selection is not an
+	 *         {@link ITreeSelection} nor an {@link IStructuredSelection}.
+	 */
+	private ITestElement getCurrentViewerSelection() {
+		final ISelection currentSelection= fSelectionProvider.getSelection();
+		if (currentSelection instanceof ITreeSelection) {
+			return (ITestElement) ((ITreeSelection) currentSelection).getFirstElement();
+		} else if (currentSelection instanceof IStructuredSelection) {
+			return (ITestElement) ((IStructuredSelection) currentSelection).getFirstElement();
+		}
+		return null;
+	}
+
+	/**
+	 * Finds the closest {@link ITestElement} for the given {@link IJavaElement}. The search for the
+	 * closest element starts from the {@link ITestElement} currently selected, to avoid an annoying
+	 * selection shift if the {@link ITestSuiteElement} was ran multiple time in the test session.
+	 * 
+	 * @param javaElement the {@link IJavaElement} associated with the {@link ITestElement} to find.
+	 * @param currentTestElement the current {@link ITestElement} selected in the TestViewer
+	 * @return the {@link ITestElement} or null if it could not be found.
+	 */
+	private ITestElement findClosestTestElement(final IJavaElement javaElement, final ITestElement currentTestElement) {
+		// skip if JUnit is still running or if no Java element was selected
+		if (fTestRunnerPart.getCurrentProgressState() != ProgressState.COMPLETED || javaElement == null) {
+			return null;
+		}
+		// if the current selection already matches the given java element
+		if (matches(currentTestElement, javaElement)) {
+			return currentTestElement;
+		}
+		// if current selection is a TestCaseElement / Java method, move to the parent
+		ITestElementContainer currentElementContainer= getTestElementContainer(currentTestElement);
+		// now, look in the current test container, or move to parent container until root
+		search:
+		while (currentElementContainer != null) {
+			switch (javaElement.getElementType()) {
+				case IJavaElement.METHOD:
+					final ITestCaseElement resultTestCaseElement= findTestCaseElement(currentElementContainer, (IMethod) javaElement);
+					if (resultTestCaseElement != null) {
+						return resultTestCaseElement;
+					}
+					break;
+				case IJavaElement.TYPE:
+				case IJavaElement.COMPILATION_UNIT:
+					final ITestSuiteElement resultTestSuiteElement= findTestSuiteElement(currentElementContainer, javaElement);
+					if (resultTestSuiteElement != null) {
+						return resultTestSuiteElement;
+					}
+					break;
+				default:
+					// no result will be provided if the user selects anything else, including package declaration, imports and fields.
+					break search;
+			}
+			currentElementContainer= currentElementContainer.getParentContainer();
+		}
+		return null;
+	}
+
+	/**
+	 * Compares the given {@link IJavaElement} with the given {@link ITestElement} and checks if
+	 * they match:
+	 * <ul>
+	 * <li>If the {@link ITestElement} is an {@link ITestSuiteElement}, the valid
+	 * {@link IJavaElement} are an {@link IType} or an {@link ICompilationUnit}.</li>
+	 * <li>If the {@link ITestElement} is an {@link TestCaseElement}, the valid {@link IJavaElement}
+	 * is an {@link IMethod}.</li>
+	 * </ul>
+	 * @param currentTestElement the current {@link ITestElement} to analyze
+	 * @param expectedJavaElement the expected {@link IJavaElement} to match
+	 * 
+	 * @return <code>true</code> if the given arguments match, <code>false</code> otherwise.
+	 */
+	private boolean matches(final ITestElement currentTestElement, final IJavaElement expectedJavaElement) {
+		if (currentTestElement instanceof TestCaseElement) {
+			final TestCaseElement currentTestCaseElement= (TestCaseElement) currentTestElement;
+			return currentTestCaseElement.getJavaMethod() != null
+					&& currentTestCaseElement.getJavaMethod().equals(expectedJavaElement);
+		} else if (currentTestElement instanceof TestSuiteElement) {
+			final TestSuiteElement currentTestSuiteElement= (TestSuiteElement) currentTestElement;
+			return currentTestSuiteElement.getJavaType() != null
+					&& (currentTestSuiteElement.getJavaType().equals(expectedJavaElement) || currentTestSuiteElement.getJavaType().getCompilationUnit().equals(expectedJavaElement));
+		}
+		return false;
+	}
+
+	/**
+	 * Finds and returns the closest {@link ITestElementContainer} for the given
+	 * {@link ITestElement}.
+	 * 
+	 * @param testElement the {@link ITestElement} to analyze
+	 * @return the given {@link ITestElement} is already an {@link ITestElementContainer}, or the
+	 *         {@link ITestElement#getParentContainer()} if the given {@link ITestElement} is not
+	 *         <code>null</code>, or the current {@link TestRunSession}.
+	 */
+	private ITestElementContainer getTestElementContainer(final ITestElement testElement) {
+		if (testElement instanceof ITestElementContainer) {
+			return (ITestElementContainer) testElement;
+		} else if (testElement != null) {
+			return testElement.getParentContainer();
+		}
+		return fTestRunSession;
+	}
+
+	/**
+	 * Finds the {@link ITestCaseElement} with the given test class name and test method name in the
+	 * given {@link ITestSuiteElement}
+	 * 
+	 * @param parentElement the parent Test Suite
+	 * @param javaMethod the java method corresponding to the {@link ITestCaseElement} to find
+	 * 
+	 * @return the {@link ITestCaseElement} or null if it could not be found.
+	 */
+	private ITestCaseElement findTestCaseElement(final ITestElementContainer parentElement, final IMethod javaMethod) {
+		final IType javaType= (IType) javaMethod.getAncestor(IJavaElement.TYPE);
+		final String testClassName= javaType.getFullyQualifiedName();
+		final String testMethodName= javaMethod.getElementName();
+		for (ITestElement childElement : parentElement.getChildren()) {
+			if (childElement instanceof ITestCaseElement) {
+				final TestCaseElement testCaseElement= (TestCaseElement)childElement;
+				if (testCaseElement.getJavaType() != null && testCaseElement.getJavaType().getFullyQualifiedName().equals(testClassName) && testCaseElement.getJavaMethod() != null
+						&& testCaseElement.getJavaMethod() != null && testCaseElement.getJavaMethod().getElementName().equals(testMethodName)) {
+					return testCaseElement;
+				}
+			} else if (childElement instanceof ITestSuiteElement) {
+				final ITestCaseElement localResult= findTestCaseElement((ITestSuiteElement) childElement, javaMethod);
+				if (localResult != null) {
+					return localResult;
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Finds the {@link ITestSuiteElement} with the given test class name matching the given {@link IJavaElement} name in the given
+	 * {@link ITestElementContainer}
+	 * 
+	 * @param parentElement the parent Test Suite
+	 * @param javaElement the {@link IType} or {@link ICompilationUnit} corresponding to the {@link ITestSuiteElement} to find
+	 * 
+	 * @return the {@link ITestSuiteElement} or null if it could not be found.
+	 */
+	private ITestSuiteElement findTestSuiteElement(final ITestElementContainer parentElement, final IJavaElement javaElement) {
+		final String testClassName= getFullyQualifiedName(javaElement);
+		if (parentElement instanceof ITestSuiteElement && ((ITestSuiteElement) parentElement).getSuiteTypeName().equals(testClassName)) {
+			return (ITestSuiteElement) parentElement;
+		}
+		for (ITestElement childElement : parentElement.getChildren()) {
+			if (childElement instanceof ITestSuiteElement) {
+				final ITestSuiteElement childTestSuite= (ITestSuiteElement)childElement;
+				if (childTestSuite.getSuiteTypeName().equals(testClassName)) {
+					return childTestSuite;
+				}
+				final ITestSuiteElement matchingNestedTestSuiteElement= findTestSuiteElement(childTestSuite, javaElement);
+				if (matchingNestedTestSuiteElement != null) {
+					return matchingNestedTestSuiteElement;
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * @return the fully qualified name of the given {@link IJavaElement} if it is an {@link IType} or an {@link ICompilationUnit}, <code>null</code> otherwise.
+	 * @param javaElement the {@link IJavaElement} to analyze.
+	 */
+	private String getFullyQualifiedName(final IJavaElement javaElement) {
+		if (javaElement == null) {
+			return null;
+		} else if (javaElement.getElementType() == IJavaElement.TYPE) {
+			return ((IType) javaElement).getFullyQualifiedName();
+		} else if (javaElement.getElementType() == IJavaElement.COMPILATION_UNIT) {
+			return ((ICompilationUnit) javaElement).findPrimaryType().getFullyQualifiedName();
+		}
+		return null;
+	}
+
 	public void selectFirstFailure() {
 		TestCaseElement firstFailure= getNextChildFailure(fTestRunSession.getTestRoot(), true);
 		if (firstFailure != null)
@@ -722,5 +971,117 @@ public class TestViewer {
 		fTreeViewer.expandToLevel(2);
 	}
 
-}
+	/**
+	 * Reacts to a selection change in the active {@link IWorkbenchPart} (or when another part
+	 * received the focus).
+	 * 
+	 * @param part the {@link IWorkbenchPart} in which the selection change occurred
+	 * @param selection the selection in the given part
+	 * @since 3.8
+	 */
+	public void selectionChanged(IWorkbenchPart part, ISelection selection) {
+		if (part instanceof IEditorPart) {
+			setSelection((IEditorPart)part);
+		}
+		// any ITreeSelection (eg: Project Explorer, Package Explorer, Content Outline) should be considered, too.
+		else if (selection instanceof ITreeSelection) {
+			final ITreeSelection treeSelection= (ITreeSelection) selection;
+			if (treeSelection.size() == 1 && treeSelection.getFirstElement() instanceof IJavaElement) {
+				setSelection((IJavaElement) treeSelection.getFirstElement());
+			}
+		}
+	}
 
+	/**
+	 * @return the selected {@link IJavaElement} in the current editor if it is a {@link CompilationUnitEditor}, null otherwise.
+	 * @param editor the editor
+	 */
+	private IJavaElement getSelectedJavaElementInEditor(final IEditorPart editor) {
+		if (editor instanceof JavaEditor) {
+			final JavaEditor javaEditor= (JavaEditor) editor;
+			try {
+				final IJavaElement inputJavaElement= JavaUI.getEditorInputJavaElement(editor.getEditorInput());
+				// when the editor is opened on a .class file, not a .java source file
+				if (inputJavaElement.getElementType() == IJavaElement.CLASS_FILE) {
+					final IClassFile classFile= (IClassFile) inputJavaElement;
+					return classFile.getType();
+				}
+				final ITextSelection selection= (ITextSelection) javaEditor.getSelectionProvider().getSelection();
+				final ICompilationUnit compilationUnit= (ICompilationUnit)inputJavaElement.getAncestor(IJavaElement.COMPILATION_UNIT);
+				final IJavaElement selectedElement= compilationUnit.getElementAt(selection.getOffset());
+				return selectedElement;
+			} catch (JavaModelException e) {
+				JUnitPlugin.log(e);
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Handles the case when a {@link TestCaseElement} has been selected, unless there's a
+	 * {@link TestRunSession} in progress.
+	 * 
+	 * @param testElement the new selected {@link TestCaseElement}
+	 */
+	private void handleTestElementSelected(final ITestElement testElement) {
+		if (fTestRunnerPart.getCurrentProgressState().equals(ProgressState.RUNNING)) {
+			return;
+		}
+		if (testElement instanceof TestCaseElement) {
+			final IMethod selectedMethod= ((TestCaseElement)testElement).getJavaMethod();
+			handleJavaElementSelected(selectedMethod);
+		} else if (testElement instanceof TestSuiteElement) {
+			final IJavaElement selectedElement= ((TestSuiteElement)testElement).getJavaElement();
+			handleJavaElementSelected(selectedElement);
+		}
+	}
+
+	/**
+	 * Reveals the given {@link IJavaElement} in its associated Editor if this later is already
+	 * open, and sets the "Link with Editor" button state accordingly.
+	 * 
+	 * @param selectedJavaElement the selected {@link IJavaElement} in the {@link TestViewer} that
+	 *            should be revealed in its Java Editor.
+	 */
+	private void handleJavaElementSelected(final IJavaElement selectedJavaElement) {
+		// skip if there's no editor open (yet)
+		if (fTestRunnerPart.getSite().getPage().getActiveEditor() == null) {
+			return;
+		}
+		try {
+			final IEditorPart editor= EditorUtility.isOpenInEditor(selectedJavaElement);
+			if (selectedJavaElement != null && editor != null && editor instanceof JavaEditor) {
+				final JavaEditor javaEditor= (JavaEditor)editor;
+				final ITextSelection javaEditorSelection= (ITextSelection)javaEditor.getSelectionProvider().getSelection();
+				final IEditorPart selectedMethodEditor= EditorUtility.isOpenInEditor(selectedJavaElement);
+				// checks if the editor is already open or not
+				if (selectedMethodEditor != null) {
+					// Retrieve the current active editor
+					final IEditorPart activeEditor= fTestRunnerPart.getSite().getPage().getActiveEditor();
+					// open the required editor if it is not the active one
+					if (!selectedMethodEditor.equals(activeEditor)) {
+						EditorUtility.openInEditor(selectedJavaElement, false);
+					}
+					// retrieve the current java element (unless the associated compilation unit cannot be retrieved)
+					final ICompilationUnit compilationUnit= (ICompilationUnit)selectedJavaElement.getAncestor(IJavaElement.COMPILATION_UNIT);
+					fTestRunnerPart.setLinkingWithEditorInSync(true);
+					if (compilationUnit != null) {
+						final IJavaElement javaEditorSelectedElement= compilationUnit.getElementAt(javaEditorSelection.getOffset());
+						// force to reveal the selected element in case where the editor was not active
+						if (!selectedMethodEditor.equals(activeEditor) || !selectedJavaElement.equals(javaEditorSelectedElement)) {
+							EditorUtility.revealInEditor(selectedMethodEditor, selectedJavaElement);
+						}
+					}
+					return;
+				}
+			}
+		} catch (JavaModelException e) {
+			JUnitPlugin.log(e);
+		} catch (PartInitException e) {
+			// occurs if the editor could not be opened or the input element is not valid Status code
+			JUnitPlugin.log(e);
+		}
+		fTestRunnerPart.setLinkingWithEditorInSync(false);
+	}
+
+}

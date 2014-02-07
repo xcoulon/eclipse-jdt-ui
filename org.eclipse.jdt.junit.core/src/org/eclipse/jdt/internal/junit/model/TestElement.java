@@ -9,7 +9,9 @@
  *     IBM Corporation - initial API and implementation
  *     Brock Janiczak (brockj@tpg.com.au)
  *         - https://bugs.eclipse.org/bugs/show_bug.cgi?id=102236: [JUnit] display execution time next to each test
- *     Xavier Coulon <xcoulon@redhat.com> - https://bugs.eclipse.org/bugs/show_bug.cgi?id=102512 - [JUnit] test method name cut off before (
+ *     Xavier Coulon <xcoulon@redhat.com> 
+ *         - [JUnit] test method name cut off before '(' - https://bugs.eclipse.org/bugs/show_bug.cgi?id=102512
+ *         - [JUnit] Add "Link with Editor" to JUnit view - https://bugs.eclipse.org/bugs/show_bug.cgi?id=372588 
  *******************************************************************************/
 
 package org.eclipse.jdt.internal.junit.model;
@@ -19,6 +21,11 @@ import org.eclipse.jdt.junit.model.ITestElementContainer;
 import org.eclipse.jdt.junit.model.ITestRunSession;
 
 import org.eclipse.core.runtime.Assert;
+
+import org.eclipse.jdt.core.IType;
+import org.eclipse.jdt.core.JavaModelException;
+
+import org.eclipse.jdt.internal.junit.JUnitCorePlugin;
 
 
 public abstract class TestElement implements ITestElement {
@@ -175,6 +182,10 @@ public abstract class TestElement implements ITestElement {
 
 	private boolean fAssumptionFailed;
 
+	private IType fJavaType= null;
+
+	private boolean fJavaTypeResolved= false;
+
 	/**
 	 * Running time in seconds. Contents depend on the current {@link #getProgressState()}:
 	 * <ul>
@@ -323,6 +334,25 @@ public abstract class TestElement implements ITestElement {
 	public String getClassName() {
 		return extractClassName(getTestName());
 	}
+
+	/**
+	 * @return the Java {@link IType} associated with this {@link TestElement}.
+	 * @since 3.7
+	 */
+	public IType getJavaType() {
+		if (!fJavaTypeResolved) {
+			try {
+				fJavaType= getTestRunSession().getLaunchedProject().findType(getClassName());
+			} catch (JavaModelException e) {
+				JUnitCorePlugin.log(e);
+			} finally {
+				fJavaTypeResolved= true;
+			}
+		}
+		return fJavaType;
+	}
+
+
 
 	private static String extractClassName(String testNameString) {
 		testNameString= extractRawClassName(testNameString);

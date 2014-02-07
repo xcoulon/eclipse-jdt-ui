@@ -697,7 +697,7 @@ public class JUnitLaunchConfigurationTab extends AbstractLaunchConfigurationTab 
 			String superclassName= type.getSuperclassName();
 			if (superclassName != null) {
 				int pos= superclassName.indexOf('<');
-				if (pos != -1) 
+				if (pos != -1)
 					superclassName= superclassName.substring(0, pos);
 				String[][] resolvedSupertype= type.resolveType(superclassName);
 				if (resolvedSupertype != null && resolvedSupertype.length > 0) {

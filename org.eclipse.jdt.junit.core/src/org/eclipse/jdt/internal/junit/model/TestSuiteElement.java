@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2000, 2008 IBM Corporation and others.
+ * Copyright (c) 2000, 2014 IBM Corporation and others.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Eclipse Public License v1.0
  * which accompanies this distribution, and is available at
@@ -7,6 +7,7 @@
  *
  * Contributors:
  *     IBM Corporation - initial API and implementation
+ *     Xavier Coulon <xcoulon@redhat.com> -  [JUnit] Add "Link with Editor" to JUnit view - https://bugs.eclipse.org/bugs/show_bug.cgi?id=372588
  *******************************************************************************/
 
 package org.eclipse.jdt.internal.junit.model;
@@ -17,8 +18,18 @@ import java.util.List;
 import org.eclipse.jdt.junit.model.ITestElement;
 import org.eclipse.jdt.junit.model.ITestSuiteElement;
 
+import org.eclipse.core.runtime.IAdaptable;
 
-public class TestSuiteElement extends TestElement implements ITestSuiteElement {
+import org.eclipse.jdt.core.IJavaElement;
+import org.eclipse.jdt.core.IMethod;
+import org.eclipse.jdt.core.IType;
+
+
+public class TestSuiteElement extends TestElement implements ITestSuiteElement, IAdaptable {
+
+	private IJavaElement fJavaElement= null;
+
+	private boolean fJavaElementResolved= false;
 
 	private List/*<TestElement>*/ fChildren;
 	private Status fChildrenStatus;
@@ -151,4 +162,62 @@ public class TestSuiteElement extends TestElement implements ITestSuiteElement {
 		return "TestSuite: " + getSuiteTypeName() + " : " + super.toString() + " (" + fChildren.size() + ")";   //$NON-NLS-1$//$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
 	}
 
+	/**
+	 * Provides support for converting this {@link TestSuiteElement} into an {@link IType} (or an
+	 * {@link IMethod} when this {@link TestSuiteElement} matches a JUnit Parameterized Test) when
+	 * the given adapter class is {@link IJavaElement}.
+	 * 
+	 * @param adapter the class in which this {@link TestSuiteElement} should be adapted.
+	 * @return an object in the request type, or null if it could not be adapted.
+	 * @since 3.7
+	 */
+	public Object getAdapter(Class adapter) {
+		if (adapter != null && adapter.equals(IJavaElement.class)) {
+			return getJavaElement();
+		}
+		return null;
+	}
+
+	/**
+	 * Returns the closest {@link IJavaElement} for the given {@link TestSuiteElement}, including
+	 * with a work-around for Parameterized tests by looking at the child elements: if there's only
+	 * one, return its Java {@link IMethod}. Otherwise, return the {@link IType}
+	 * 
+	 * @return the {@link IJavaElement} found for this {@link TestSuiteElement}.
+	 * 
+	 * @since 3.7
+	 * @see TestElement#getJavaType()
+	 */
+	public IJavaElement getJavaElement() {
+		if (!fJavaElementResolved) {
+			// whatever happens, let's consider that the Java Type has been resolved, to make sure we don't come back here again for this TestSuitElement.
+			fJavaElementResolved= true;
+			fJavaElement= super.getJavaType();
+			if (fJavaElement == null) {
+				if (getChildren().length == 1 && getChildren()[0] instanceof TestCaseElement) {
+					fJavaElement= ((TestCaseElement)getChildren()[0]).getJavaMethod();
+				}
+			}
+		}
+		return fJavaElement;
+	}
+
+	/**
+	 * Returns the {@link IType} associated with the given {@link TestSuiteElement}, or uses the
+	 * work-around in {@link TestSuiteElement#getJavaElement()} to retrieve the {@link IType}
+	 * associated with the single child {@link TestCaseElement} if this {@link TestSuiteElement}
+	 * matches a Parameterized JUnit Test.
+	 * 
+	 * @since 3.7
+	 * @see TestElement#getJavaType()
+	 */
+	public IType getJavaType() {
+		final IType javaType= super.getJavaType();
+		if (javaType != null) {
+			return javaType;
+		} else if (getJavaElement() != null) {
+			return (IType)fJavaElement.getAncestor(IJavaElement.TYPE);
+		}
+		return null;
+	}
 }

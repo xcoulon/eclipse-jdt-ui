@@ -16,6 +16,7 @@
  *     Andrew Eisenberg <andrew@eisenberg.as> - [JUnit] Rerun failed first does not work with JUnit4 - https://bugs.eclipse.org/bugs/show_bug.cgi?id=140392
  *     Thirumala Reddy Mutchukota <thirumala@google.com> - [JUnit] Avoid rerun test launch on UI thread - https://bugs.eclipse.org/bugs/show_bug.cgi?id=411841
  *     Andrew Eisenberg <andrew@eisenberg.as> - [JUnit] Add a monospace font option for the junit results view - https://bugs.eclipse.org/bugs/show_bug.cgi?id=411794
+ *     Xavier Coulon <xcoulon@redhat.com> -  [JUnit] Add "Link with Editor" to JUnit view - https://bugs.eclipse.org/bugs/show_bug.cgi?id=372588
  *******************************************************************************/
 package org.eclipse.jdt.internal.junit.ui;
 
@@ -36,6 +37,7 @@ import java.util.Date;
 import java.util.Iterator;
 import java.util.List;
 
+import org.eclipse.jdt.junit.model.ITestElement.ProgressState;
 import org.eclipse.jdt.junit.model.ITestElement.Result;
 
 import org.eclipse.swt.SWT;
@@ -96,6 +98,7 @@ import org.eclipse.jface.dialogs.InputDialog;
 import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.operation.IRunnableWithProgress;
 import org.eclipse.jface.resource.ImageDescriptor;
+import org.eclipse.jface.viewers.ISelection;
 
 import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IEditorActionBarContributor;
@@ -149,6 +152,9 @@ import org.eclipse.jdt.internal.junit.model.TestRunSession;
 
 import org.eclipse.jdt.launching.IJavaLaunchConfigurationConstants;
 
+import org.eclipse.jdt.internal.ui.JavaPluginImages;
+import org.eclipse.jdt.internal.ui.actions.AbstractToggleLinkingAction;
+import org.eclipse.jdt.internal.ui.javaeditor.JavaEditor;
 import org.eclipse.jdt.internal.ui.viewsupport.ViewHistory;
 
 /**
@@ -210,6 +216,7 @@ public class TestRunnerViewPart extends ViewPart {
 	private Action fPreviousAction;
 
 	private StopAction fStopAction;
+	private LinkWithEditorAction fLinkWithEditorAction;
 	private JUnitCopyAction fCopyAction;
 	private Action fPasteAction;
 
@@ -320,12 +327,21 @@ public class TestRunnerViewPart extends ViewPart {
 	public static final Object FAMILY_JUNIT_RUN = new Object();
 
 	private IPartListener2 fPartListener= new IPartListener2() {
-		public void partActivated(IWorkbenchPartReference ref) { }
-		public void partBroughtToTop(IWorkbenchPartReference ref) { }
+
+		public void partActivated(IWorkbenchPartReference ref) {
+		}
+
+		public void partBroughtToTop(IWorkbenchPartReference ref) {
+			updateTestViewerSelection(ref);
+		}
+
 		public void partInputChanged(IWorkbenchPartReference ref) { }
 		public void partClosed(IWorkbenchPartReference ref) { }
 		public void partDeactivated(IWorkbenchPartReference ref) { }
-		public void partOpened(IWorkbenchPartReference ref) { }
+
+		public void partOpened(IWorkbenchPartReference ref) {
+			updateTestViewerSelection(ref);
+		}
 
 		public void partVisible(IWorkbenchPartReference ref) {
 			if (getSite().getId().equals(ref.getId())) {
@@ -336,6 +352,14 @@ public class TestRunnerViewPart extends ViewPart {
 		public void partHidden(IWorkbenchPartReference ref) {
 			if (getSite().getId().equals(ref.getId())) {
 				fPartIsVisible= false;
+			}
+		}
+
+		private void updateTestViewerSelection(IWorkbenchPartReference ref) {
+			final IWorkbenchPart part= ref.getPart(false);
+			if (part instanceof JavaEditor && fLinkWithEditorAction.isChecked()) {
+				final ISelection selection= ((JavaEditor) part).getSelectionProvider().getSelection();
+				fTestViewer.selectionChanged(part, selection);
 			}
 		}
 	};
@@ -899,6 +923,70 @@ public class TestRunnerViewPart extends ViewPart {
 		}
 	}
 
+	/**
+	 * This action toggles whether this {@link TestRunnerViewPart} links its selection to the active
+	 * editor.
+	 *
+	 */
+	private class LinkWithEditorAction extends AbstractToggleLinkingAction {
+
+		/** Image to use when the sync is on.*/
+		private static final String SYNCED_GIF= "synced.gif"; //$NON-NLS-1$
+		
+		/** Image to use when the sync is broken.*/
+		private static final String SYNC_BROKEN_GIF= "sync_broken.gif"; //$NON-NLS-1$
+		
+		/**
+		 * Default image when the action is created (as defined in the constructor of the
+		 * superclass).
+		 */
+		private String fIconName= SYNCED_GIF;
+		
+		LinkWithEditorAction() {
+			super();
+			// enable by default
+			setChecked(true);
+		}
+
+		@Override
+		public void run() {
+			setLinkingWithEditorActive(isChecked());
+		}
+		
+		/**
+		 * Updates the Link image with a "normal link" image if parameter is true, or a
+		 * "broken link" image otherwise
+		 * 
+		 * @param isInSync the state of synchronization
+		 */
+		public void updateLinkImage(boolean isInSync) {
+			fIconName= isInSync ? SYNCED_GIF : SYNC_BROKEN_GIF;
+			JavaPluginImages.setLocalImageDescriptors(this, fIconName);
+		}
+
+	}
+
+	/**
+	 * @return {@code true} if the {@link LinkWithEditorAction} is checked, {@code false} otherwise.
+	 * @since 3.8
+	 */
+	public boolean isLinkWithEditorActive() {
+		return fLinkWithEditorAction.isChecked();
+	}
+
+	/**
+	 * @return the {@link ProgressState} of the current {@link TestRunSession}, or
+	 *         {@link ProgressState#NOT_STARTED} if there's no {@link TestRunSession} yet.
+	 * @since 3.8
+	 */
+	public ProgressState getCurrentProgressState() {
+		if (fTestRunSession == null) {
+			return ProgressState.NOT_STARTED;
+		}
+		return fTestRunSession.getProgressState();
+	}
+
+
 	private class RerunLastAction extends Action {
 		public RerunLastAction() {
 			setText(JUnitMessages.TestRunnerViewPart_rerunaction_label);
@@ -1200,6 +1288,38 @@ public class TestRunnerViewPart extends ViewPart {
 		}
 	}
 
+	/**
+	 * Activate the 'Link with Editor' in the current {@link IWorkbenchPage}. (The
+	 * {@link TestViewer} will respond to {@link ISelection} changes.)
+	 * 
+	 * @param active boolean to indicate if the link with editor is active ({@code true}) or not (
+	 *            {@code false})
+	 * 
+	 * @since 3.8
+	 */
+	public void setLinkingWithEditorActive(final boolean active) {
+		if (active) {
+			getSite().getPage().addPostSelectionListener(fTestViewer);
+			fTestViewer.setSelection(getSite().getPage().getActiveEditor());
+		} else {
+			getSite().getPage().removePostSelectionListener(fTestViewer);
+			// force the icon to 'synced' mode
+			setLinkingWithEditorInSync(true);
+		}
+	}
+
+	/**
+	 * Updates the Link image with a "normal link" image if parameter is true, or a "broken link"
+	 * image otherwise
+	 * 
+	 * @param isInSync the state of synchronization
+	 * 
+	 * @since 3.8
+	 */
+	public void setLinkingWithEditorInSync(final boolean isInSync) {
+		fLinkWithEditorAction.updateLinkImage(isInSync);
+	}
+
 	private void startUpdateJobs() {
 		postSyncProcessChanges();
 
@@ -1245,7 +1365,7 @@ public class TestRunnerViewPart extends ViewPart {
 		boolean hasErrorsOrFailures= hasErrorsOrFailures();
 		fNextAction.setEnabled(hasErrorsOrFailures);
 		fPreviousAction.setEnabled(hasErrorsOrFailures);
-
+		fLinkWithEditorAction.setEnabled(fTestRunSession != null);
 		fTestViewer.processChangesInUI();
 	}
 
@@ -1512,6 +1632,12 @@ action enablement
 				stopUpdateJobs();
 
 				fStopAction.setEnabled(fTestRunSession.isKeptAlive());
+				// if "Link with Editor" is active, register the listener
+				if (isLinkWithEditorActive()) {
+					getSite().getPage().addPostSelectionListener(fTestViewer);
+					fTestViewer.setSelection(getSite().getPage().getActiveEditor());
+				}
+
 				fTestViewer.expandFirstLevel();
 			}
 		}
@@ -1579,6 +1705,7 @@ action enablement
 		if (fFailureTrace != null) {
 			fFailureTrace.dispose();
 		}
+		getSite().getPage().removePostSelectionListener(fTestViewer);
 	}
 
 	private void disposeImages() {
@@ -1783,6 +1910,9 @@ action enablement
 		if (!testRunSessions.isEmpty()) {
 			fTestRunSessionListener.sessionAdded(testRunSessions.get(0));
 		}
+		fLinkWithEditorAction.setChecked(true);
+		setLinkingWithEditorActive(true);
+		setLinkingWithEditorInSync(true);
 	}
 
 	private void addDropAdapter(Composite parent) {
@@ -1887,6 +2017,10 @@ action enablement
 		fStopAction= new StopAction();
 		fStopAction.setEnabled(false);
 
+		fLinkWithEditorAction= new LinkWithEditorAction();
+		fLinkWithEditorAction.setChecked(false);
+		fLinkWithEditorAction.setEnabled(false);
+
 		fRerunLastTestAction= new RerunLastAction();
 		IHandlerService handlerService= getSite().getWorkbenchWindow().getService(IHandlerService.class);
 		IHandler handler = new AbstractHandler() {
@@ -1937,6 +2071,8 @@ action enablement
 		toolBar.add(fRerunFailedFirstAction);
 		toolBar.add(fStopAction);
 		toolBar.add(fViewHistory.createHistoryDropDownAction());
+		toolBar.add(new Separator());
+		toolBar.add(fLinkWithEditorAction);
 
 
 		viewMenu.add(fShowTestHierarchyAction);
